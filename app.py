@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import base64
 from io import BytesIO
-from datetime import timedelta
+from datetime import timedelta, datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -82,6 +82,31 @@ def calculate_average_consultation_time(df):
         seconds = int(avg_seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
     return "Unknown"
+
+# Filter DataFrame by date range
+def filter_by_date_range(df, start_date, end_date):
+    try:
+        # Ensure ConsultationCreatedDate is in datetime format
+        df['ConsultationCreatedDate'] = pd.to_datetime(df['ConsultationCreatedDate'], errors='coerce')
+        # Filter rows where ConsultationCreatedDate is within the selected range
+        mask = (df['ConsultationCreatedDate'].dt.date >= start_date) & (df['ConsultationCreatedDate'].dt.date <= end_date)
+        return df[mask]
+    except Exception as e:
+        st.error(f"Error filtering by date: {e}")
+        return df
+
+# Filter DataFrame by PatientId or PatientName
+def filter_by_patient_search(df, patient_id, patient_name):
+    try:
+        filtered_df = df
+        if patient_id:
+            filtered_df = filtered_df[filtered_df['PatientId'].astype(str).str.contains(patient_id, case=False, na=False)]
+        if patient_name:
+            filtered_df = filtered_df[filtered_df['PatientName'].astype(str).str.contains(patient_name, case=False, na=False)]
+        return filtered_df
+    except Exception as e:
+        st.error(f"Error filtering by patient search: {e}")
+        return df
 
 # Process the data and generate report
 def generate_consultation_report(df):
@@ -237,8 +262,33 @@ def main():
             # Load Excel file
             df = pd.read_excel(uploaded_file)
             
+            # Ensure ConsultationCreatedDate is in datetime format
+            df['ConsultationCreatedDate'] = pd.to_datetime(df['ConsultationCreatedDate'], errors='coerce')
+            
+            # Date range filter
+            st.subheader("Filter by Date Range")
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start Date", value=df['ConsultationCreatedDate'].min().date() if not df['ConsultationCreatedDate'].isna().all() else datetime.today().date())
+            with col2:
+                end_date = st.date_input("End Date", value=df['ConsultationCreatedDate'].max().date() if not df['ConsultationCreatedDate'].isna().all() else datetime.today().date())
+            
+            # Patient search filter
+            st.subheader("Search by Patient ID or Name")
+            col3, col4 = st.columns(2)
+            with col3:
+                patient_id = st.text_input("Patient ID", "")
+            with col4:
+                patient_name = st.text_input("Patient Name", "")
+            
+            # Filter data by date range
+            filtered_df = filter_by_date_range(df, start_date, end_date)
+            
+            # Further filter by patient ID or name
+            filtered_df = filter_by_patient_search(filtered_df, patient_id, patient_name)
+            
             # Generate report
-            report_df = generate_consultation_report(df)
+            report_df = generate_consultation_report(filtered_df)
             
             if report_df is not None and not report_df.empty:
                 # Calculate summary statistics
@@ -246,7 +296,7 @@ def main():
                 avg_score = report_df['CompletionScore (%)'].mean()
                 max_score = report_df['CompletionScore (%)'].max()
                 min_score = report_df['CompletionScore (%)'].min()
-                avg_time = calculate_average_consultation_time(df)
+                avg_time = calculate_average_consultation_time(filtered_df)
                 
                 # Display summary statistics
                 st.subheader("Report Summary")
@@ -289,7 +339,7 @@ def main():
                 )
 
             else:
-                st.error("No data to display. The file may be empty or incorrectly formatted.")
+                st.error("No data to display after filtering. The file may be empty, incorrectly formatted, or no records match the selected date range or search criteria.")
         
         except Exception as e:
             st.error(f"Error processing the file: {e}")
