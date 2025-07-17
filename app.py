@@ -1,19 +1,241 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import base64
 from io import BytesIO
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, time
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
+# Streamlit app
+def main():
+    # Set page config as the first Streamlit command
+    st.set_page_config(page_title="eSanjeevani Consultation Analysis", layout="wide")
+
+    # Custom CSS for professional styling
+    st.markdown("""
+        <style>
+        .main {
+            background-color: #f8fafc;
+            padding: 15px;
+            font-family: 'Arial', sans-serif;
+        }
+        .stApp {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #1e40af;
+            font-size: 26px;
+            margin-bottom: 10px;
+        }
+        h2 {
+            color: #1e40af;
+            font-size: 18px;
+            margin-top: 8px;
+            margin-bottom: 5px;
+        }
+        .stButton>button {
+            background-color: #1e40af;
+            color: white;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 14px;
+            margin-right: 8px;
+        }
+        .stButton>button:hover {
+            background-color: #2563eb;
+        }
+        .stDataFrame {
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stExpander {
+            background-color: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .sidebar .sidebar-content {
+            background-color: #ffffff;
+            border-right: 1px solid #e5e7eb;
+            padding: 10px;
+        }
+        .stMetric {
+            background-color: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 8px;
+            margin-bottom: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            font-size: 14px;
+        }
+        .stMetric label {
+            font-size: 14px;
+            color: #1e40af;
+        }
+        .stMetric div {
+            font-size: 16px;
+            font-weight: bold;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Initialize session state for date inputs
+    if 'start_date' not in st.session_state:
+        st.session_state.start_date = datetime.today().date()  # 04:24 PM IST, Thursday, July 17, 2025
+    if 'end_date' not in st.session_state:
+        st.session_state.end_date = datetime.today().date()  # 04:24 PM IST, Thursday, July 17, 2025
+
+    # Main container for all content
+    with st.container():
+        # Header section
+        st.title("eSanjeevani Teleconsultation Report")
+        st.markdown("Upload an Excel file to analyze consultation completion scores, time taken, and missing fields.", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("Choose Excel File", type=["xlsx"], help="Upload an Excel file (up to 1000 MB).", key="uploader")
+
+    # Sidebar for filters
+    with st.sidebar:
+        st.header("Filters")
+        st.subheader("Date Range")
+        start_date = st.date_input("Start Date", value=st.session_state.start_date, key="start_date_unique")
+        end_date = st.date_input("End Date", value=st.session_state.end_date, key="end_date_unique")
+        
+        # Update session state with current selections
+        st.session_state.start_date = start_date
+        st.session_state.end_date = end_date
+        
+        st.subheader("Patient Search")
+        patient_id = st.text_input("Patient ID", "", key="patient_id")
+        patient_name = st.text_input("Patient Name", "", key="patient_name")
+
+    if uploaded_file is not None:
+        try:
+            # Load Excel file
+            df = pd.read_excel(uploaded_file)
+            
+            # Ensure ConsultationCreatedDate is in datetime format
+            df['ConsultationCreatedDate'] = pd.to_datetime(df['ConsultationCreatedDate'], errors='coerce')
+            
+            # Update session state with data-driven date defaults if available
+            if not df['ConsultationCreatedDate'].isna().all():
+                min_date = df['ConsultationCreatedDate'].min().date()
+                max_date = df['ConsultationCreatedDate'].max().date()
+                st.session_state.start_date = min_date
+                st.session_state.end_date = max_date
+            
+            # Filter data by date range
+            filtered_df = filter_by_date_range(df, st.session_state.start_date, st.session_state.end_date)
+            
+            # Further filter by patient ID or name
+            filtered_df = filter_by_patient_search(filtered_df, patient_id, patient_name)
+            
+            # Generate report
+            report_df = generate_consultation_report(filtered_df)
+            
+            if report_df is not None and not report_df.empty:
+                # Calculate summary statistics
+                total_patients = len(report_df)
+                avg_score = report_df['CompletionScore (%)'].mean()
+                max_score = report_df['CompletionScore (%)'].max()
+                min_score = report_df['CompletionScore (%)'].min()
+                avg_missing_score = report_df['MissingFieldScore'].mean()
+                avg_time, valid_count, error_messages = calculate_average_consultation_time(filtered_df)
+                
+                # Calculate percentages for pie chart
+                high_score_count = len(report_df[report_df['CompletionScore (%)'] >= 75])
+                low_score_count = len(report_df[report_df['CompletionScore (%)'] < 50])
+                other_score_count = total_patients - high_score_count - low_score_count
+                high_score_percent = (high_score_count / total_patients * 100) if total_patients > 0 else 0
+                low_score_percent = (low_score_count / total_patients * 100) if total_patients > 0 else 0
+                other_score_percent = (other_score_count / total_patients * 100) if total_patients > 0 else 0
+
+                # Dashboard section
+                with st.container():
+                    st.subheader("Dashboard")
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        pie_data = pd.DataFrame({
+                            'Category': ['Score >= 75%', 'Score < 50%', 'Score 50-75%'],
+                            'Percentage': [high_score_percent, low_score_percent, other_score_percent]
+                        })
+                        fig = px.pie(pie_data, values='Percentage', names='Category', title='Score Distribution')
+                        fig.update_layout(margin=dict(t=30, b=10, l=10, r=10))
+                        st.plotly_chart(fig, use_container_width=True)
+                    with col2:
+                        st.markdown("**Summary Statistics**")
+                        col3, col4 = st.columns(2)
+                        with col3:
+                            st.metric("Total Patients", total_patients)
+                            st.metric("Avg Completion Score", f"{avg_score:.2f}%")
+                            st.metric("Avg MissingFieldScore", f"{avg_missing_score:.2f}%")
+                            st.metric("Max Completion Score", f"{max_score:.2f}%")
+                        with col4:
+                            st.metric("Min Completion Score", f"{min_score:.2f}%")
+                            st.metric("Avg Consultation Time", avg_time)
+                            st.metric("Score >= 75%", f"{high_score_percent:.2f}%")
+                            st.metric("Score < 50%", f"{low_score_percent:.2f}%")
+
+                # Patient Consultation Report
+                with st.expander("Patient Consultation Report", expanded=True):
+                    st.dataframe(report_df, use_container_width=True, height=300)
+
+                # Download buttons
+                with st.container():
+                    st.subheader("Download Reports")
+                    col5, col6, col7 = st.columns(3)
+                    with col5:
+                        csv = convert_df_to_csv(report_df)
+                        st.download_button(
+                            label="CSV",
+                            data=csv,
+                            file_name="consultation_report.csv",
+                            mime="text/csv",
+                        )
+                    with col6:
+                        excel_data = generate_excel_report(report_df, total_patients, avg_score, max_score, min_score, avg_time, high_score_percent, low_score_percent, avg_missing_score)
+                        st.download_button(
+                            label="Excel",
+                            data=excel_data,
+                            file_name="consultation_report.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    with col7:
+                        pdf_data = generate_pdf_report(report_df, total_patients, avg_score, max_score, min_score, avg_time, high_score_percent, low_score_percent, avg_missing_score)
+                        st.download_button(
+                            label="PDF",
+                            data=pdf_data,
+                            file_name="consultation_report.pdf",
+                            mime="application/pdf",
+                        )
+
+                # Notes section
+                with st.expander("Notes", expanded=False):
+                    st.markdown(f"**Time Processing Info:** Processed {valid_count} valid time entries.")
+                    if error_messages:
+                        st.markdown("**Warnings:**\n- " + "\n- ".join(error_messages[:5]) + ("\n- ...and more" if len(error_messages) > 5 else ""))
+            else:
+                st.error("No data to display. The file may be empty, incorrectly formatted, or no records match the filters.")
+        
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
+    else:
+        st.info("Please upload an Excel file to proceed.")
+
 # Function to parse HH_MM_SS column to seconds for average calculation
-def parse_hh_mm_ss(time_str):
+def parse_hh_mm_ss(time_input):
     try:
-        if pd.isna(time_str) or time_str == '':
-            return None
-        # Expecting format MM:SS or HH:MM:SS
+        if isinstance(time_input, time):
+            time_str = time_input.strftime('%H:%M:%S')
+        else:
+            time_str = str(time_input)
+            if pd.isna(time_str) or time_str == '':
+                return None, "Empty or NaN"
+        
         parts = time_str.split(':')
         if len(parts) == 2:
             minutes, seconds = map(int, parts)
@@ -21,74 +243,94 @@ def parse_hh_mm_ss(time_str):
         elif len(parts) == 3:
             hours, minutes, seconds = map(int, parts)
         else:
-            return None
-        return hours * 3600 + minutes * 60 + seconds
-    except:
-        return None
+            return None, f"Invalid format: {time_str}"
+        
+        if hours < 0 or minutes < 0 or seconds < 0 or minutes >= 60 or seconds >= 60:
+            return None, f"Invalid time values: {time_str}"
+        
+        return hours * 3600 + minutes * 60 + seconds, None
+    except Exception as e:
+        return None, f"Error parsing {time_str}: {str(e)}"
 
 # Function to get time taken from HH_MM_SS column
 def get_time_taken(row):
     try:
-        time_str = row.get('HH_MM_SS', 'Unknown')
-        if pd.isna(time_str) or time_str == '':
+        time_input = row.get('HH_MM_SS', 'Unknown')
+        if pd.isna(time_input) or time_input == '':
             return "Unknown"
-        return time_str
+        if isinstance(time_input, time):
+            return time_input.strftime('%H:%M:%S')
+        return str(time_input)
     except:
         return "Unknown"
 
-# Function to calculate consultation completion score and missing fields
+# Function to calculate consultation completion score, filled fields, and missing fields
 def calculate_completion_score(row):
     score = 0
-    total_fields = 0
+    total_fields = 8
+    filled_fields = []
     missing_fields = []
 
-    # Define fields to check for completeness
+    # Fields based on assumed image data
     fields_to_check = [
-        'PatientName', 'Age', 'GenderDisplay', 'ABHANumber', 'IsFollowUp',
-        'SentByLocationName', 'SentByName', 'SentToLocationName', 'SentToName',
-        'SentToSpecialityDisplay', 'ConsultationCreatedDate', 'ConsultationStatus',
-        'StartDate', 'CloseDate', 'Snomed FamilyHistory', 'Snomed MedicalHistory',
-        'Snomed PersonalHistory', 'Additional MedicalHistory', 'Snomed Allergy',
-        'AdditionalAllergy', 'Snomed Active Medicine', 'Diagnostics',
-        'AdditionalDiagnostics', 'Query', 'Additional Medicine',
-        'Provisional Diagnosis', 'Additional Diagnosis', 'Snomed Medicine',
-        'Advice', 'Symptoms_', 'DifferentialDiagnosis_'
+        'PatientName',
+        'Age',
+        'GenderDisplay',
+        'ConsultationCreatedDate',
+        'ConsultationStatus',
+        'Symptoms_',
+        'Provisional Diagnosis',
+        'Advice'
     ]
 
     for field in fields_to_check:
-        total_fields += 1
-        # Check if the field exists and is not empty or NaN
-        if field in row and pd.notna(row[field]) and row[field] != '':
+        value = row.get(field)
+        if pd.isna(value):
+            missing_fields.append(field)
+        elif field == 'Symptoms_' and isinstance(value, str) and '"Alias"' in value:
+            # Handle malformed Symptoms_ data (e.g., [{Alias":"Common Cold")
             score += 1
+            filled_fields.append(field)
+        elif value != '':
+            score += 1
+            filled_fields.append(field)
         else:
             missing_fields.append(field)
 
-    # Calculate percentage
+    # Calculate completion percentage
     completion_percentage = (score / total_fields) * 100 if total_fields > 0 else 0
-    return round(completion_percentage, 2), missing_fields
+    # Calculate missing fields percentage
+    missing_percentage = ((total_fields - score) / total_fields) * 100 if total_fields > 0 else 0
+    return round(completion_percentage, 2), filled_fields, missing_fields, round(missing_percentage, 2), fields_to_check
 
 # Calculate average consultation time from HH_MM_SS
 def calculate_average_consultation_time(df):
     total_seconds = 0
     valid_count = 0
+    error_messages = []
     for _, row in df.iterrows():
-        time_seconds = parse_hh_mm_ss(row.get('HH_MM_SS', ''))
+        time_seconds, error = parse_hh_mm_ss(row.get('HH_MM_SS', ''))
         if time_seconds is not None:
             total_seconds += time_seconds
             valid_count += 1
+        else:
+            if error:
+                error_messages.append(f"Row {row.name + 2}: {error}")
     if valid_count > 0:
         avg_seconds = total_seconds / valid_count
         minutes = int(avg_seconds // 60)
         seconds = int(avg_seconds % 60)
-        return f"{minutes:02d}:{seconds:02d}"
-    return "Unknown"
+        result = f"{minutes:02d}:{seconds:02d}"
+    else:
+        result = "00:00"
+        error_messages.append("No valid time entries found in HH_MM_SS column.")
+    
+    return result, valid_count, error_messages
 
 # Filter DataFrame by date range
 def filter_by_date_range(df, start_date, end_date):
     try:
-        # Ensure ConsultationCreatedDate is in datetime format
         df['ConsultationCreatedDate'] = pd.to_datetime(df['ConsultationCreatedDate'], errors='coerce')
-        # Filter rows where ConsultationCreatedDate is within the selected range
         mask = (df['ConsultationCreatedDate'].dt.date >= start_date) & (df['ConsultationCreatedDate'].dt.date <= end_date)
         return df[mask]
     except Exception as e:
@@ -113,56 +355,49 @@ def generate_consultation_report(df):
     if df is None or df.empty:
         return None
 
-    # Initialize report list
     report = []
-
-    # Process each patient
     for index, row in df.iterrows():
         patient_id = row.get('PatientId', 'Unknown')
         consultation_id = row.get('ConsultationId', 'Unknown')
-        completion_score, missing_fields = calculate_completion_score(row)
+        completion_score, filled_fields, missing_fields, missing_percentage, _ = calculate_completion_score(row)
         time_taken = get_time_taken(row)
         
         patient_report = {
             'PatientId': patient_id,
             'ConsultationId': consultation_id,
             'CompletionScore (%)': completion_score,
-            'MissingFields': ', '.join(missing_fields) if missing_fields else 'None',
+            'CompletionField': ', '.join(filled_fields),
+            'MissingFieldScore': missing_percentage,
+            'MissingFields': ', '.join(missing_fields),
             'TimeTaken (MM:SS)': time_taken,
             'Status': row.get('ConsultationStatus', 'Unknown'),
-            'Symptoms': row.get('Symptoms_', 'No symptoms recorded'),
-            'Diagnosis': row.get('Provisional Diagnosis', 'No diagnosis recorded'),
-            'Advice': row.get('Advice', 'No advice recorded')
+            'Symptoms': row.get('Symptoms_', ''),
+            'Diagnosis': row.get('Provisional Diagnosis', ''),
+            'Advice': row.get('Advice', '')
         }
         report.append(patient_report)
 
-    # Convert report to DataFrame
     report_df = pd.DataFrame(report)
+    column_order = [
+        'PatientId', 'ConsultationId', 'CompletionScore (%)', 'CompletionField',
+        'MissingFieldScore', 'MissingFields', 'TimeTaken (MM:SS)', 'Status',
+        'Symptoms', 'Diagnosis', 'Advice'
+    ]
+    report_df = report_df[column_order]
     return report_df
 
-# Generate Excel report with dashboard sheet
-def generate_excel_report(report_df, total_patients, avg_score, max_score, min_score, avg_time):
+# Generate Excel report with four sheets
+def generate_excel_report(report_df, total_patients, avg_score, max_score, min_score, avg_time, high_score_percent, low_score_percent, avg_missing_score):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Write patient report to first sheet
         report_df.to_excel(writer, sheet_name='Patient Report', index=False)
-        
-        # Create dashboard sheet
+        high_score_df = report_df[report_df['CompletionScore (%)'] >= 75]
+        high_score_df.to_excel(writer, sheet_name='Score >= 75%', index=False)
+        mid_score_df = report_df[(report_df['CompletionScore (%)'] >= 50) & (report_df['CompletionScore (%)'] < 75)]
+        mid_score_df.to_excel(writer, sheet_name='Score 50-75%', index=False)
         dashboard_data = {
-            'Metric': [
-                'Total Patients',
-                'Average Completion Score',
-                'Maximum Completion Score',
-                'Minimum Completion Score',
-                'Average Consultation Time (MM:SS)'
-            ],
-            'Value': [
-                total_patients,
-                f"{avg_score:.2f}%",
-                f"{max_score:.2f}%",
-                f"{min_score:.2f}%",
-                avg_time
-            ]
+            'Category': ['Score >= 75%', 'Score < 50%', 'Score 50-75%'],
+            'Percentage': [high_score_percent, low_score_percent, (100 - high_score_percent - low_score_percent)]
         }
         dashboard_df = pd.DataFrame(dashboard_data)
         dashboard_df.to_excel(writer, sheet_name='Dashboard', index=False)
@@ -170,17 +405,14 @@ def generate_excel_report(report_df, total_patients, avg_score, max_score, min_s
     return output.getvalue()
 
 # Generate PDF report using reportlab
-def generate_pdf_report(report_df, total_patients, avg_score, max_score, min_score, avg_time):
+def generate_pdf_report(report_df, total_patients, avg_score, max_score, min_score, avg_time, high_score_percent, low_score_percent, avg_missing_score):
     output = BytesIO()
     doc = SimpleDocTemplate(output, pagesize=A4)
     elements = []
     styles = getSampleStyleSheet()
 
-    # Add title
     elements.append(Paragraph("eSanjeevani Teleconsultation Report", styles['Title']))
     elements.append(Spacer(1, 12))
-
-    # Add summary statistics
     elements.append(Paragraph("Summary Statistics", styles['Heading2']))
     summary_data = [
         ['Metric', 'Value'],
@@ -188,7 +420,10 @@ def generate_pdf_report(report_df, total_patients, avg_score, max_score, min_sco
         ['Average Completion Score', f"{avg_score:.2f}%"],
         ['Maximum Completion Score', f"{max_score:.2f}%"],
         ['Minimum Completion Score', f"{min_score:.2f}%"],
-        ['Average Consultation Time (MM:SS)', avg_time]
+        ['Average MissingFieldScore', f"{avg_missing_score:.2f}%"],
+        ['Average Consultation Time (MM:SS)', avg_time],
+        ['Patients with Score >= 75%', f"{high_score_percent:.2f}%"],
+        ['Patients with Score < 50%', f"{low_score_percent:.2f}%"]
     ]
     summary_table = Table(summary_data)
     summary_table.setStyle(TableStyle([
@@ -203,27 +438,24 @@ def generate_pdf_report(report_df, total_patients, avg_score, max_score, min_sco
     ]))
     elements.append(summary_table)
     elements.append(Spacer(1, 12))
-
-    # Add patient consultation details
     elements.append(Paragraph("Patient Consultation Details", styles['Heading2']))
-    # Prepare table data
     table_data = [list(report_df.columns)]
     for _, row in report_df.iterrows():
-        # Truncate long fields to prevent overflow
         row_data = [
             str(row['PatientId'])[:20],
             str(row['ConsultationId'])[:20],
             str(row['CompletionScore (%)']),
-            str(row['MissingFields'])[:50] + ('...' if len(str(row['MissingFields'])) > 50 else ''),
+            str(row['CompletionField']),
+            str(row['MissingFieldScore']),
+            str(row['MissingFields']),
             str(row['TimeTaken (MM:SS)']),
             str(row['Status'])[:20],
-            str(row['Symptoms'])[:50] + ('...' if len(str(row['Symptoms'])) > 50 else ''),
-            str(row['Diagnosis'])[:50] + ('...' if len(str(row['Diagnosis'])) > 50 else ''),
-            str(row['Advice'])[:50] + ('...' if len(str(row['Advice'])) > 50 else '')
+            str(row['Symptoms']),
+            str(row['Diagnosis']),
+            str(row['Advice'])
         ]
         table_data.append(row_data)
     
-    # Create table
     table = Table(table_data)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
@@ -237,8 +469,6 @@ def generate_pdf_report(report_df, total_patients, avg_score, max_score, min_sco
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
     ]))
     elements.append(table)
-
-    # Build PDF
     doc.build(elements)
     return output.getvalue()
 
@@ -247,104 +477,6 @@ def convert_df_to_csv(df):
     output = BytesIO()
     df.to_csv(output, index=False)
     return output.getvalue()
-
-# Streamlit app
-def main():
-    st.set_page_config(page_title="eSanjeevani Consultation Analysis", layout="wide")
-    st.title("eSanjeevani Teleconsultation Completion Report")
-    st.write("Upload an Excel file containing consultation details to generate a completion score report for each patient, including time taken and missing fields.")
-
-    # File uploader
-    uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx"])
-
-    if uploaded_file is not None:
-        try:
-            # Load Excel file
-            df = pd.read_excel(uploaded_file)
-            
-            # Ensure ConsultationCreatedDate is in datetime format
-            df['ConsultationCreatedDate'] = pd.to_datetime(df['ConsultationCreatedDate'], errors='coerce')
-            
-            # Date range filter
-            st.subheader("Filter by Date Range")
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date", value=df['ConsultationCreatedDate'].min().date() if not df['ConsultationCreatedDate'].isna().all() else datetime.today().date())
-            with col2:
-                end_date = st.date_input("End Date", value=df['ConsultationCreatedDate'].max().date() if not df['ConsultationCreatedDate'].isna().all() else datetime.today().date())
-            
-            # Patient search filter
-            st.subheader("Search by Patient ID or Name")
-            col3, col4 = st.columns(2)
-            with col3:
-                patient_id = st.text_input("Patient ID", "")
-            with col4:
-                patient_name = st.text_input("Patient Name", "")
-            
-            # Filter data by date range
-            filtered_df = filter_by_date_range(df, start_date, end_date)
-            
-            # Further filter by patient ID or name
-            filtered_df = filter_by_patient_search(filtered_df, patient_id, patient_name)
-            
-            # Generate report
-            report_df = generate_consultation_report(filtered_df)
-            
-            if report_df is not None and not report_df.empty:
-                # Calculate summary statistics
-                total_patients = len(report_df)
-                avg_score = report_df['CompletionScore (%)'].mean()
-                max_score = report_df['CompletionScore (%)'].max()
-                min_score = report_df['CompletionScore (%)'].min()
-                avg_time = calculate_average_consultation_time(filtered_df)
-                
-                # Display summary statistics
-                st.subheader("Report Summary")
-                st.write(f"**Total Patients:** {total_patients}")
-                st.write(f"**Average Completion Score:** {avg_score:.2f}%")
-                st.write(f"**Maximum Completion Score:** {max_score:.2f}%")
-                st.write(f"**Minimum Completion Score:** {min_score:.2f}%")
-                st.write(f"**Average Consultation Time (MM:SS):** {avg_time}")
-
-                # Display the report
-                st.subheader("Patient Consultation Report")
-                st.dataframe(report_df, use_container_width=True)
-
-                # Generate and provide download buttons
-                # CSV Download
-                csv = convert_df_to_csv(report_df)
-                st.download_button(
-                    label="Download Report as CSV",
-                    data=csv,
-                    file_name="consultation_completion_report.csv",
-                    mime="text/csv",
-                )
-
-                # Excel Download
-                excel_data = generate_excel_report(report_df, total_patients, avg_score, max_score, min_score, avg_time)
-                st.download_button(
-                    label="Download Report as Excel",
-                    data=excel_data,
-                    file_name="consultation_completion_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-
-                # PDF Download
-                pdf_data = generate_pdf_report(report_df, total_patients, avg_score, max_score, min_score, avg_time)
-                st.download_button(
-                    label="Download Report as PDF",
-                    data=pdf_data,
-                    file_name="consultation_completion_report.pdf",
-                    mime="application/pdf",
-                )
-
-            else:
-                st.error("No data to display after filtering. The file may be empty, incorrectly formatted, or no records match the selected date range or search criteria.")
-        
-        except Exception as e:
-            st.error(f"Error processing the file: {e}")
-    else:
-        st.info("Please upload an Excel file to proceed.")
 
 if __name__ == "__main__":
     main()
